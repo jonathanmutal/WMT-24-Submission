@@ -1,11 +1,12 @@
 # Instructions
 
 ### installing tools
-
-#### Moses
 ```
 $ mkdir tools
 $ cd tools
+```
+#### Moses
+```
 $ git clone https://github.com/moses-smt/mosesdecoder.git
 ```
 #### Fasttext

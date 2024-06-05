@@ -10,9 +10,7 @@ class Metrics():
 
     def __post_init__(self):
         self.load_files()
-
         print("Levenshtein distance: {}".format(self.calculate_distance()))
-
 
     def load_files(self):
         def load_corpus(filepath):
