@@ -29,6 +29,10 @@ for file in CCMatrix GNOME KDE4 NLLB QED TED2020 Tatoeba Ubuntu WikiMatrix XLEnt
 done
 
 ## add the ratio
+for file in CCMatrix GNOME KDE4 NLLB QED TED2020 Tatoeba Ubuntu WikiMatrix XLEnt wikimedia
+do
+	python ${python_scripts}/preprocess/lev_ratio.py ${data_output}/${file}.es-oc.es.filtered ${data_output}/${file}.es-oc.oc.filtered
+done
 
 for file in CCMatrix GNOME KDE4 NLLB QED TED2020 Tatoeba Ubuntu WikiMatrix XLEnt wikimedia
 do

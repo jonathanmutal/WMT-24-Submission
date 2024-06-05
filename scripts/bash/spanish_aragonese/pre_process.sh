@@ -32,8 +32,10 @@ do
 done
 
 ## add the ratio
-
-
+for file in GNOME QED Tatoeba Ubuntu WikiMatrix XLent wikimedia
+do
+	python3 ${python_scripts}/preprocess/lev_ratio.py ${data_output}/${file}.an-es.an.filtered ${data_output}/${file}.an-es.es.filtered
+done
 
 ## stats for each corpus
 for file in GNOME QED Tatoeba Ubuntu WikiMatrix XLent wikimedia

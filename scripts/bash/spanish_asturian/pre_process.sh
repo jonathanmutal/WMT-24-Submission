@@ -4,6 +4,7 @@ data_dir=./data/opus/spanish_asturian
 data_output=./data/opus/preprocess/spanish_asturian
 fast_text=./tools/fast_text/fastText
 moses_decoder=./tools/mosesdecoder/scripts
+python_scripts=./scripts/python
 
 ## preprocess the data before
 ## LUCIA: add a pipe with different preprocessing (maybe a truecase?)
@@ -29,7 +30,10 @@ for file in CCMatrix GNOME KDE4 NLLB QED TED2020 Tatoeba Ubuntu wikimedia
 done
 
 ## add the ratio
-
+for file in CCMatrix GNOME KDE4 NLLB QED TED2020 Tatoeba Ubuntu wikimedia
+  do
+  	python3 ${python_scripts}/preprocess/lev_ratio.py ${data_output}/${file}.ast-es.ast.filtered ${data_output}/${file}.ast-es.es.filtered
+done
 
 for file in CCMatrix GNOME KDE4 NLLB QED TED2020 Tatoeba Ubuntu wikimedia
 do
