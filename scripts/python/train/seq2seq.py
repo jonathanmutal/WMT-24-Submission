@@ -815,7 +815,7 @@ class Trainer():
             is_main_process=self.accelerator.is_main_process,
             save_function=self.accelerator.save
         )
-
+        self.accelerator.save_state(f"{self.output_dir}/{name}")
         if self.accelerator.is_main_process:
             self.tokenizer.save_pretrained(f"{self.output_dir}/{name}")
 
@@ -830,7 +830,7 @@ class Trainer():
                 shutil.rmtree(dir_to_rm)
 
         with open(f"{self.output_dir}/{name}/earlystopping", "w") as f:
-            f.write(f"{self.best_bleu}\t{self.bleu_early_stopping}")
+            f.write(f"{self.best_bleu} {self.bleu_early_stopping}")
 
     def write_prediction(self, predictions):
         with open(f"{self.output_dir}/prediction", mode="w") as o:
@@ -907,12 +907,6 @@ class Trainer():
         self.logger.info(f"  Multilingual approach = {self.multilingual}")
         # Only show the progress bar once on each machine.
 
-        score, prediction = self.validate()
-        self.logger.info(f"Validation Step 0 -- BLEU: {score['BLEU']:.2f}")
-        progress_bar = tqdm(range(self.max_train_steps), disable=not self.accelerator.is_local_main_process)
-        completed_steps = 0
-        starting_epoch = 0
-
         # Potentially load in the weights and states from a previous save
         # TODO: move the resume from checkpoint to a new method
         if self.resume_from_checkpoint:
@@ -931,6 +925,7 @@ class Trainer():
 
             self.accelerator.print(f"Resumed from checkpoint: {checkpoint_path}")
             self.accelerator.load_state(checkpoint_path)
+            #self.model.load_state_dict(checkpoint_path)
             # Extract `epoch_{i}` or `step_{i}`
             training_difference = os.path.splitext(path)[0]
 
@@ -938,7 +933,7 @@ class Trainer():
             if self.early_stopping:
                 self.logger.info(f"Resuming early stopping steps from {checkpoint_path}/earlystopping")
                 with open(f"{checkpoint_path}/earlystopping") as f:
-                    best_bleu, bleu_early_stopping  = f.readlines()[0].strip().split('\t')
+                    best_bleu, bleu_early_stopping  = f.readlines()[0].strip().split(' ')
                 self.best_bleu, self.bleu_early_stopping = float(best_bleu), int(bleu_early_stopping)
 
             if "epoch" in training_difference:
@@ -957,6 +952,12 @@ class Trainer():
                 self.logger.info(f"  Resumed from checkpoint = {checkpoint_path}")
                 self.logger.info(f"  Starting Epoch = {starting_epoch}")
                 self.logger.info(f"  Completed Steps = {completed_steps}")
+
+        score, prediction = self.validate()
+        self.logger.info(f"Validation Step 0 -- BLEU: {score['BLEU']:.2f}")
+        progress_bar = tqdm(range(self.max_train_steps), disable=not self.accelerator.is_local_main_process)
+        completed_steps = 0
+        starting_epoch = 0
         # update the progress_bar if load from checkpoint
         progress_bar.update(completed_steps)
 
