@@ -14,10 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Fine-tuning a 🤗 Transformers model on text translation.
+Fine-tuning a Transformers model on text translation.
 """
-# You can also adapt this script on your own text translation task. Pointers for this are left as comments.
-
 import argparse
 import json
 import logging
@@ -37,7 +35,7 @@ from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from sacrebleu.metrics import BLEU, CHRF, TER
 
-from datasets import load_dataset, Dataset
+from datasets import load_dataset, Dataset, concatenate_datasets
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -53,6 +51,7 @@ from transformers import (
     MBartTokenizerFast,
     NllbTokenizer,
     NllbTokenizerFast,
+    MarianTokenizer,
     SchedulerType,
     default_data_collator,
     get_scheduler,
@@ -76,6 +75,7 @@ def postprocess_text(preds, labels):
     labels = [label.strip() for label in labels]
 
     return preds, labels
+
 
 # Parsing input arguments
 def parse_args():
@@ -319,6 +319,24 @@ def parse_args():
             "Number of checkpoints to save the model. If early stopping, it will always save the best model in best_model folder."
         ),
      )
+    parser.add_argument(
+        "--multilingual",
+        action="store_true",
+        help=(
+            "training in a multilingal fashion. In this case we need to use the attribute multilingual_files"
+        ),
+     )
+    parser.add_argument(
+        "--multilingual_files",
+        type=str,
+        default=None,
+        help=(
+            "training in a multilingal fashion in the target. \
+            we need to specify the token in the KEY and path in the Value. For \
+            instance, \
+            {oci_Latn: [{\"source\" : ./data/occitan/source.es, \"target\": ./data/occitan/target.oc}]}"
+        ),
+     )
     args = parser.parse_args()
 
     # Sanity checks
@@ -329,16 +347,35 @@ def parse_args():
         args.early_stopping = True
         args.early_stopping_steps = 100000
 
-    if args.train_source_file is None and args.validation_source_file is None:
+    if args.train_source_file is None and \
+       args.validation_source_file is None:
         raise ValueError("Need either a task name or a training/validation source file.")
 
-    if args.train_target_file is None and args.validation_target_file is None:
+    if args.train_target_file is None and \
+       args.validation_target_file is None:
         raise ValueError("Need either a task name or a training/validation target file.")
 
     ## if val_max_target_length is not set
     if args.val_max_target_length is None:
         args.val_max_target_length = args.max_target_length
 
+    # sanity check for multilingual
+    if args.multilingual and args.multilingual_files is None:
+        raise ValueError("Please, provide the data inside the multilingual_files parameter \
+                         for the task in json format.")
+
+    if args.multilingual and args.multilingual_files:
+        print(args.multilingual_files)
+        args.multilingual_files = json.loads(args.multilingual_files)
+        ## validating if it has the src and tgt keys.
+        for key in args.multilingual_files.keys():
+            for index, pair_files in enumerate(args.multilingual_files[key]):
+                if not "source" in pair_files:
+                    raise ValueError(f"Please, provide the source file (in source key) for the \
+                                      file {index} in the {key} language")
+                if not "target" in pair_files:
+                    raise ValueError(f"Please, provide the target file (in target key) for the \
+                                       file {index} in the {key} language")
     return args
 
 
@@ -394,6 +431,9 @@ class Trainer():
     resume_from_checkpoint_path: str = None
     with_tracking: bool = True
     report_to: str = "TensorBoard"
+
+    multilingual: bool = False
+    multilingual_files : dict[list] = None
 
     def __post_init__(self):
         # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
@@ -488,6 +528,21 @@ class Trainer():
             if self.target_lang is not None:
                 self.tokenizer.tgt_lang = self.target_lang
 
+        # if it is multilingual, we check if the special token is in the vocabulary
+        # otherwise, we add it
+        if self.multilingual:
+            special_tokens_to_add = []
+            for key in self.multilingual_files.keys():
+                special_tokens_to_add.append(key)
+
+            ## by default we will add the tokens and initizitilie randomly the embedding layers
+            if special_tokens_to_add:
+                self.tokenizer.add_tokens(new_tokens=special_tokens_to_add, special_tokens=True)
+
+                if self.accelerator.is_main_process:
+                    self.logger.warning(f"we add these tokens to the tokenizer: {special_tokens_to_add}")
+
+
     def set_model_configuration(self):
         """ Load pretrained model configuration"""
         if self.config_name:
@@ -518,6 +573,8 @@ class Trainer():
         embedding_size = self.model.get_input_embeddings().weight.shape[0]
         if len(self.tokenizer) > embedding_size:
             self.model.resize_token_embeddings(len(self.tokenizer))
+            if self.accelerator.is_main_process:
+                self.logger.warning(f"we randomly initiate {len(self.tokenizer) - embedding_size} tokens for training.")
 
         # Set decoder_start_token_id
         if self.model.config.decoder_start_token_id is None and \
@@ -554,8 +611,10 @@ class Trainer():
                 return corpus
             source_sents = load_corpus(source_file_name)
             target_sents = load_corpus(target_file_name)
+
             assert len(source_sents) == len(target_sents),\
                     f"{source_file_name} and {target_file_name} do no have the same number of sentences"
+
             parallel_dataset = Dataset.from_dict(
                 {'source': source_sents,
                  'target': target_sents}
@@ -565,6 +624,16 @@ class Trainer():
         self.raw_dataset_train = load_parallel_dataset(self.train_source_file, self.train_target_file)
         self.raw_dataset_valid = load_parallel_dataset(self.validation_source_file, self.validation_target_file)
 
+        if self.multilingual:
+            self.raw_dataset_multilingual = {}
+            for key in self.multilingual_files.keys():
+                parallel_datasets = []
+                for parallel_data in self.multilingual_files[key]:
+                    parallel_datasets.append(
+                        load_parallel_dataset(parallel_data["source"], parallel_data["target"])
+                    )
+                self.raw_dataset_multilingual[key] = concatenate_datasets(parallel_datasets)
+
     def preprocess_data(self):
         prefix = self.source_prefix if self.source_prefix is not None else ""
 
@@ -573,10 +642,15 @@ class Trainer():
         column_names = self.raw_dataset_train.column_names
         padding = "max_length" if self.pad_to_max_length else False
 
-        def preprocess_dataset(dataset: Dataset):
+        def preprocess_dataset(dataset: Dataset, source_lang: str = None, target_lang: str = None):
             def preprocess_function(examples: dict):
+                self.tokenizer.src_lang = source_lang
+                self.tokenizer.tgt_lang = target_lang
                 inputs = examples["source"]
                 targets = examples["target"]
+                ## for marianNMT, we need to add the token for the tokenizer
+                if target_lang and isinstance(self.tokenizer, MarianTokenizer):
+                    targets = [target_lang + " " + target for target in targets]
                 inputs = [prefix + inp for inp in inputs]
                 model_inputs = self.tokenizer(inputs, max_length=self.max_source_length, padding=padding, truncation=True)
 
@@ -591,6 +665,7 @@ class Trainer():
                     ]
 
                 model_inputs["labels"] = labels["input_ids"]
+
                 return model_inputs
 
             return dataset.map(
@@ -604,14 +679,30 @@ class Trainer():
             )
 
         with self.accelerator.main_process_first():
-            self.train_dataset = preprocess_dataset(self.raw_dataset_train)
-            self.eval_dataset = preprocess_dataset(self.raw_dataset_valid)
+            self.train_dataset = preprocess_dataset(self.raw_dataset_train, source_lang=self.source_lang, target_lang=self.target_lang)
+            self.eval_dataset = preprocess_dataset(self.raw_dataset_valid, source_lang=self.source_lang, target_lang=self.target_lang)
+            ## if it is multilingual, we preprocess each language with each special token
+            if self.multilingual:
+                multilingual_datasets = []
+                for key in self.raw_dataset_multilingual.keys():
+                    multilingual_datasets.append(
+                        preprocess_dataset(self.raw_dataset_multilingual[key],
+                                           source_lang=self.source_lang,
+                                           target_lang=key)
+                    )
+                ## joining all the datasets together
+                self.train_dataset = concatenate_datasets([self.train_dataset] + multilingual_datasets)
 
         # Log a few random samples from the training set:
         for index in random.sample(range(len(self.train_dataset)), 3):
             self.logger.info(f"Sample {index} of the training set: {self.train_dataset[index]}.")
             self.logger.info(f"Input: {self.tokenizer.decode(self.train_dataset[index]['input_ids'], skip_special_tokens=False)}")
             self.logger.info(f"Output: {self.tokenizer.decode(self.train_dataset[index]['labels'], skip_special_tokens=False)}")
+
+        if self.multilingual:
+            self.logger.info(f"Sample {index} of the multilingual data set: {multilingual_datasets[0][0]}.")
+            self.logger.info(f"Input: {self.tokenizer.decode(multilingual_datasets[0][0]['input_ids'], skip_special_tokens=False)}")
+            self.logger.info(f"Output: {self.tokenizer.decode(multilingual_datasets[0][0]['labels'], skip_special_tokens=False)}")
 
     def set_dataloader(self):
         # DataLoaders creation:
@@ -720,10 +811,26 @@ class Trainer():
         self.accelerator.wait_for_everyone()
         unwrapped_model = self.accelerator.unwrap_model(self.model)
         unwrapped_model.save_pretrained(
-            f"{self.output_dir}/{name}", is_main_process=self.accelerator.is_main_process, save_function=self.accelerator.save
+            f"{self.output_dir}/{name}",
+            is_main_process=self.accelerator.is_main_process,
+            save_function=self.accelerator.save
         )
+
         if self.accelerator.is_main_process:
             self.tokenizer.save_pretrained(f"{self.output_dir}/{name}")
+
+        if self.save_total_checkpoints and name:
+            main_name, step = name.split("_")
+            # get the directiories that begin with step
+            dirs = [f for f in os.scandir(self.output_dir) if f.is_dir() and f.name.startswith(main_name)]
+            # sort the directories by time of saves
+            dirs.sort(key=os.path.getctime)
+            # rm the directories
+            for dir_to_rm in dirs[:-self.save_total_checkpoints]:
+                shutil.rmtree(dir_to_rm)
+
+        with open(f"{self.output_dir}/{name}/earlystopping", "w") as f:
+            f.write(f"{self.best_bleu}\t{self.bleu_early_stopping}")
 
     def write_prediction(self, predictions):
         with open(f"{self.output_dir}/prediction", mode="w") as o:
@@ -797,6 +904,7 @@ class Trainer():
         self.logger.info(f"  Max source length = {self.max_source_length}")
         self.logger.info(f"  Max target length = {self.max_target_length}")
         self.logger.info(f"  Max generation target length = {self.val_max_target_length}")
+        self.logger.info(f"  Multilingual approach = {self.multilingual}")
         # Only show the progress bar once on each machine.
 
         score, prediction = self.validate()
@@ -806,6 +914,7 @@ class Trainer():
         starting_epoch = 0
 
         # Potentially load in the weights and states from a previous save
+        # TODO: move the resume from checkpoint to a new method
         if self.resume_from_checkpoint:
             if self.resume_from_checkpoint_path is not None and \
                ("epoch_" in self.resume_from_checkpoint_path or "step_" in self.resume_from_checkpoint_path):
@@ -814,9 +923,9 @@ class Trainer():
             else:
                 # Get the most recent checkpoint
                 # Only get the directories with step
-                dirs = [f.name for f in os.scandir(self.resume_from_checkpoint_path) if f.is_dir() and f.name.startswith("step")]
+                dirs = [f for f in os.scandir(self.resume_from_checkpoint_path) if f.is_dir() and f.name.startswith("step")]
                 dirs.sort(key=os.path.getctime)
-                path = dirs[-1]  # Sorts folders by date modified, most recent checkpoint is the last
+                path = dirs[-1].path  # Sorts folders by date modified, most recent checkpoint is the last
                 checkpoint_path = path
                 path = os.path.basename(checkpoint_path)
 
@@ -824,6 +933,13 @@ class Trainer():
             self.accelerator.load_state(checkpoint_path)
             # Extract `epoch_{i}` or `step_{i}`
             training_difference = os.path.splitext(path)[0]
+
+            ### setting the earlystopping step from last checkpoint
+            if self.early_stopping:
+                self.logger.info(f"Resuming early stopping steps from {checkpoint_path}/earlystopping")
+                with open(f"{checkpoint_path}/earlystopping") as f:
+                    best_bleu, bleu_early_stopping  = f.readlines()[0].strip().split('\t')
+                self.best_bleu, self.bleu_early_stopping = float(best_bleu), int(bleu_early_stopping)
 
             if "epoch" in training_difference:
                 starting_epoch = int(training_difference.replace("epoch_", "")) + 1
@@ -836,6 +952,11 @@ class Trainer():
                 completed_steps = resume_step // self.gradient_accumulation_steps
                 resume_step -= starting_epoch * len(self.train_dataloader)
 
+            if self.accelerator.is_main_process:
+                self.logger.info(f"***** Resume configuration *****")
+                self.logger.info(f"  Resumed from checkpoint = {checkpoint_path}")
+                self.logger.info(f"  Starting Epoch = {starting_epoch}")
+                self.logger.info(f"  Completed Steps = {completed_steps}")
         # update the progress_bar if load from checkpoint
         progress_bar.update(completed_steps)
 
@@ -881,11 +1002,8 @@ class Trainer():
                         score, prediction = self.validate()
                         if score["BLEU"] > self.best_bleu:
                             self.best_bleu = score["BLEU"]
-                            output_dir = f"best_model"
-                            if self.output_dir is not None:
-                                output_dir = os.path.join(self.output_dir, output_dir)
                             if self.accelerator.is_main_process:
-                                self.accelerator.save_state(output_dir)
+                                self.save_model(f"bestmodel_{completed_steps}")
                             self.bleu_early_stopping = 0
                             self.write_prediction(prediction)
                         self.bleu_early_stopping += 1
@@ -906,20 +1024,8 @@ class Trainer():
 
                 # if we save the model each X steps for the checkpoint
                 if self.save_total_checkpoints and completed_steps % self.save_last_model_steps == 0:
-                   output_dir = f"step_{completed_steps}"
-                   if self.output_dir is not None:
-                       output_dir = os.path.join(self.output_dir, output_dir)
                    if self.accelerator.is_main_process:
-                       if self.save_total_checkpoints:
-                           # get the directiories that begin with step
-                           dirs = [f.name for f in os.scandir(self.output_dir) if f.is_dir() and f.name.startswith("step")]
-                           # sort the directories by time of saves
-                           dirs.sort(key=os.path.getctime)
-                           # rm the directories
-                           for dir_to_rm in dirs[:-self.save_total_checkpoints]:
-                               shutil.rmtree(dir_to_rm)
-
-                       self.accelerator.save_state(output_dir)
+                       self.save_model(f"step_{completed_steps}")
 
                 # if we finish the epochs or we reach the patient limit
                 # of improvement
@@ -927,16 +1033,14 @@ class Trainer():
                     break
 
                 if self.checkpointing_steps == "epoch":
-                    output_dir = f"epoch_{epoch}"
-                    if self.output_dir is not None:
-                        output_dir = os.path.join(self.output_dir, output_dir)
                     if self.accelerator.is_main_process:
-                        self.accelerator.save_state(output_dir)
+                        self.save_model(f"epoch_{epoch}")
 
         if self.with_tracking:
             self.accelerator.end_training()
         if self.output_dir is not None:
-            self.save_model(f"step_{completed_steps}")
+            if self.accelerator.is_main_process:
+                self.save_model(f"step_{completed_steps}")
 
         with open(os.path.join(self.output_dir, "all_results.json"), "w") as f:
             json.dump({"eval_bleu": self.best_bleu}, f)
@@ -951,8 +1055,6 @@ def main():
     send_example_telemetry("run_translation_no_trainer", args)
 
     # Handle the repository creation
-    #if accelerator.is_main_process:
-    #    os.makedirs(args.output_dir, exist_ok=True)
     #accelerator.wait_for_everyone()
     print(vars(args))
     Trainer(**vars(args)).train()
