@@ -449,6 +449,9 @@ class Trainer():
         # to set the seed and to be reproducible
         if self.set_seed is not None:
             self.set_seed()
+        # if resuming from checkpoint, we get the last trainable checkpoint
+        if self.resume_from_checkpoint:
+            self.get_last_checkpoint()
         # to intialize the tokenizer
         self.set_tokenizer()
         # in the case we want to train from scratch
@@ -732,9 +735,9 @@ class Trainer():
     def calculate_number_of_training_steps(self):
         # math around the number of training steps.
         self.overrode_max_train_steps = False
-        num_update_steps_per_epoch = math.ceil(len(self.train_dataloader) / self.gradient_accumulation_steps)
+        self.num_update_steps_per_epoch = math.ceil(len(self.train_dataloader) / self.gradient_accumulation_steps)
         if self.max_train_steps is None:
-            self.max_train_steps = self.num_train_epochs * num_update_steps_per_epoch
+            self.max_train_steps = self.num_train_epochs * self.num_update_steps_per_epoch
             self.overrode_max_train_steps = True
 
     def set_optimizer(self):
@@ -766,14 +769,39 @@ class Trainer():
         self.model, self.optimizer, self.train_dataloader, self.eval_dataloader, self.lr_scheduler = self.accelerator.prepare(
             self.model, self.optimizer, self.train_dataloader, self.eval_dataloader, self.lr_scheduler
         )
+        if self.resume_from_checkpoint:
+            ### TODO: remove this part after saving the model using accelerator.save_model.
+            if torch.cuda.is_available():
+                device =  torch.device("cuda")
+            self.accelerator.print(f"Resumed from checkpoint: {self.checkpoint_path}")
+            #self.accelerator.load_state(self.checkpoint_path)
+            ### loading optimizer
+            optimizer_state = torch.load(f"{self.checkpoint_path}/optimizer.bin", map_location=device)
+            self.optimizer.load_state_dict(optimizer_state)
+            logger.info("All optimizer states loaded successfully")
+            ### loading scheduler
+            scheduler_state = torch.load(f"{self.checkpoint_path}/scheduler.bin", map_location=device)
+            self.lr_scheduler.load_state_dict(scheduler_state)
+            logger.info("The scheduler was loaded successfully")
+            ### loading random state
+            try:
+               states = torch.load(input_dir.joinpath(f"{self.checkpoint_path}/random_states_0.pkl"))
+               random.setstate(states["random_state"])
+               np.random.set_state(states["numpy_random_seed"])
+               torch.set_rng_state(states["torch_manual_seed"])
+               torch.cuda.set_rng_state_all(states["torch_cuda_manual_seed"])
+               logger.info("All random states loaded successfully")
+            except Exception:
+                logger.info("Could not load random states")
+
         # We need to recalculate our total training steps as the size of the training dataloader may have changed.
         # During the preparation of the dataloader, especially when using libraries like accelerate, the size of the dataloader can change.
         # This can happen due to data shuffling, filtering, or other preprocessing steps that might alter the number of batches in each epoch.
-        num_update_steps_per_epoch = math.ceil(len(self.train_dataloader) / self.gradient_accumulation_steps)
+        self.num_update_steps_per_epoch = math.ceil(len(self.train_dataloader) / self.gradient_accumulation_steps)
         if self.overrode_max_train_steps:
-            self.max_train_steps = self.num_train_epochs * num_update_steps_per_epoch
+            self.max_train_steps = self.num_train_epochs * self.num_update_steps_per_epoch
         # Afterwards we recalculate our number of training epochs
-        self.num_train_epochs = math.ceil(self.max_train_steps / num_update_steps_per_epoch)
+        self.num_train_epochs = math.ceil(self.max_train_steps / self.num_update_steps_per_epoch)
 
     def set_tracker(self):
         # We need to initialize the trackers we use, and also store our configuration.
@@ -805,17 +833,26 @@ class Trainer():
         self.best_bleu = 0.0
         self.bleu_early_stopping = 0
 
+        ### setting the earlystopping step from last checkpoint
+        if self.resume_from_checkpoint:
+            self.logger.info(f"Resuming early stopping steps from {self.checkpoint_path}/earlystopping")
+            with open(f"{self.checkpoint_path}/earlystopping") as f:
+                best_bleu, bleu_early_stopping  = f.readlines()[0].strip().split(' ')
+            self.best_bleu, self.bleu_early_stopping = float(best_bleu), int(bleu_early_stopping)
+
     ### auxiliar methods for training to save, write predictions and validate
     def save_model(self, name=""):
         self.logger.info(f" Saving model to {self.output_dir}/{name}")
         self.accelerator.wait_for_everyone()
+        # TODO : remove next iterations
         unwrapped_model = self.accelerator.unwrap_model(self.model)
         unwrapped_model.save_pretrained(
             f"{self.output_dir}/{name}",
             is_main_process=self.accelerator.is_main_process,
             save_function=self.accelerator.save
         )
-        self.accelerator.save_state(f"{self.output_dir}/{name}")
+#        self.accelerator.save_model(self.model, f"{self.output_dir}/{name}")
+        self.accelerator.save_state(f"{self.output_dir}/{name}/state")
         if self.accelerator.is_main_process:
             self.tokenizer.save_pretrained(f"{self.output_dir}/{name}")
 
@@ -890,6 +927,25 @@ class Trainer():
         }
         return score, predictions
 
+    def get_last_checkpoint(self):
+        # Potentially load in the weights and states from a previous save
+        if self.resume_from_checkpoint_path is not None and \
+            ("epoch_" in self.resume_from_checkpoint_path or \
+            "step_" in self.resume_from_checkpoint_path or \
+            "bestmodel_" in self.resume_from_checkpoint_path):
+            self.checkpoint_path = self.resume_from_checkpoint_path
+        else:
+            # Get the most recent checkpoint
+            # Only get the directories with step
+            dirs = [
+                f for f in os.scandir(self.resume_from_checkpoint_path)
+                if f.is_dir() and (f.name.startswith("step") or f.name.startswith('bestmodel'))
+            ]
+            dirs.sort(key=os.path.getctime)
+            path = dirs[-1].path  # Sorts folders by date modified, most recent checkpoint is the last
+            self.checkpoint_path = path
+
+
     def train(self):
         # Train!
         total_batch_size = self.per_device_train_batch_size * self.accelerator.num_processes * self.gradient_accumulation_steps
@@ -905,61 +961,40 @@ class Trainer():
         self.logger.info(f"  Max target length = {self.max_target_length}")
         self.logger.info(f"  Max generation target length = {self.val_max_target_length}")
         self.logger.info(f"  Multilingual approach = {self.multilingual}")
+
+        progress_bar = tqdm(range(self.max_train_steps), disable=not self.accelerator.is_local_main_process)
+        completed_steps = 0
+        starting_epoch = 0
+
         # Only show the progress bar once on each machine.
-
-        # Potentially load in the weights and states from a previous save
-        # TODO: move the resume from checkpoint to a new method
         if self.resume_from_checkpoint:
-            if self.resume_from_checkpoint_path is not None and \
-               ("epoch_" in self.resume_from_checkpoint_path or "step_" in self.resume_from_checkpoint_path):
-                checkpoint_path = self.resume_from_checkpoint_path
-                path = os.path.basename(self.resume_from_checkpoint_path)
-            else:
-                # Get the most recent checkpoint
-                # Only get the directories with step
-                dirs = [f for f in os.scandir(self.resume_from_checkpoint_path) if f.is_dir() and f.name.startswith("step")]
-                dirs.sort(key=os.path.getctime)
-                path = dirs[-1].path  # Sorts folders by date modified, most recent checkpoint is the last
-                checkpoint_path = path
-                path = os.path.basename(checkpoint_path)
-
-            self.accelerator.print(f"Resumed from checkpoint: {checkpoint_path}")
-            self.accelerator.load_state(checkpoint_path)
             #self.model.load_state_dict(checkpoint_path)
             # Extract `epoch_{i}` or `step_{i}`
+            path = os.path.basename(self.checkpoint_path)
             training_difference = os.path.splitext(path)[0]
-
-            ### setting the earlystopping step from last checkpoint
-            if self.early_stopping:
-                self.logger.info(f"Resuming early stopping steps from {checkpoint_path}/earlystopping")
-                with open(f"{checkpoint_path}/earlystopping") as f:
-                    best_bleu, bleu_early_stopping  = f.readlines()[0].strip().split(' ')
-                self.best_bleu, self.bleu_early_stopping = float(best_bleu), int(bleu_early_stopping)
-
             if "epoch" in training_difference:
                 starting_epoch = int(training_difference.replace("epoch_", "")) + 1
                 resume_step = None
-                completed_steps = starting_epoch * num_update_steps_per_epoch
+                completed_steps = starting_epoch * self.num_update_steps_per_epoch
             else:
                 # need to multiply `gradient_accumulation_steps` to reflect real steps
-                resume_step = int(training_difference.replace("step_", "")) * self.gradient_accumulation_steps
+                file_name = "step_" if "step_" in training_difference else "bestmodel_"
+                resume_step = int(training_difference.replace(file_name, "")) * self.gradient_accumulation_steps
                 starting_epoch = resume_step // len(self.train_dataloader)
                 completed_steps = resume_step // self.gradient_accumulation_steps
                 resume_step -= starting_epoch * len(self.train_dataloader)
 
             if self.accelerator.is_main_process:
                 self.logger.info(f"***** Resume configuration *****")
-                self.logger.info(f"  Resumed from checkpoint = {checkpoint_path}")
+                self.logger.info(f"  Resumed from checkpoint = {self.checkpoint_path}")
                 self.logger.info(f"  Starting Epoch = {starting_epoch}")
                 self.logger.info(f"  Completed Steps = {completed_steps}")
+                self.logger.info(f"  Early Stopping = {self.best_bleu} {self.bleu_early_stopping}")
 
-        score, prediction = self.validate()
-        self.logger.info(f"Validation Step 0 -- BLEU: {score['BLEU']:.2f}")
-        progress_bar = tqdm(range(self.max_train_steps), disable=not self.accelerator.is_local_main_process)
-        completed_steps = 0
-        starting_epoch = 0
         # update the progress_bar if load from checkpoint
         progress_bar.update(completed_steps)
+        score, prediction = self.validate()
+        self.logger.info(f"Validation Step 0 -- BLEU: {score['BLEU']:.2f}")
 
         for epoch in range(starting_epoch, self.num_train_epochs):
             self.model.train()
@@ -997,6 +1032,7 @@ class Trainer():
                            step=completed_steps,
                        )
                        self.logger.info(f"Epoch : {int(epoch)+1} -- Step {completed_steps} -- Cost : {total_loss.item() / (step+1):.4f} -- lr : {self.lr_scheduler.get_last_lr()[0]:.14f} -- Loss Batch : {loss:.4f} -- Input shape : {batch['input_ids'].shape}")
+
                 ## printing the progress and doing validation
                 if isinstance(self.checkpointing_steps, int):
                     if completed_steps % self.checkpointing_steps == 0:
