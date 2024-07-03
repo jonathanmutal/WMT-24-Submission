@@ -776,16 +776,16 @@ class Trainer():
             self.accelerator.print(f"Resumed from checkpoint: {self.checkpoint_path}")
             #self.accelerator.load_state(self.checkpoint_path)
             ### loading optimizer
-            optimizer_state = torch.load(f"{self.checkpoint_path}/optimizer.bin", map_location=device)
+            optimizer_state = torch.load(f"{self.checkpoint_path}/state/optimizer.bin", map_location=device)
             self.optimizer.load_state_dict(optimizer_state)
             logger.info("All optimizer states loaded successfully")
             ### loading scheduler
-            scheduler_state = torch.load(f"{self.checkpoint_path}/scheduler.bin", map_location=device)
+            scheduler_state = torch.load(f"{self.checkpoint_path}/state/scheduler.bin", map_location=device)
             self.lr_scheduler.load_state_dict(scheduler_state)
             logger.info("The scheduler was loaded successfully")
             ### loading random state
             try:
-               states = torch.load(input_dir.joinpath(f"{self.checkpoint_path}/random_states_0.pkl"))
+               states = torch.load(f"{self.checkpoint_path}/state/random_states_0.pkl")
                random.setstate(states["random_state"])
                np.random.set_state(states["numpy_random_seed"])
                torch.set_rng_state(states["torch_manual_seed"])
@@ -993,7 +993,7 @@ class Trainer():
 
         # update the progress_bar if load from checkpoint
         progress_bar.update(completed_steps)
-        score, prediction = self.validate()
+        score, _ = self.validate()
         self.logger.info(f"Validation Step 0 -- BLEU: {score['BLEU']:.2f}")
 
         for epoch in range(starting_epoch, self.num_train_epochs):
