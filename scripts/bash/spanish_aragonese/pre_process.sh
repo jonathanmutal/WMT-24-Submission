@@ -1,53 +1,83 @@
 #!/bin/bash -v
-
 data_dir=./data/opus/spanish_aragonese
-data_output=./data/opus/preprocess/spanish_aragonese
+data_tmp=./data/opus/preprocess/spanish_aragonese
+data_output=./experiments/spanish_aragonese/data
 fast_text=./tools/fast_text/fastText
 moses_decoder=./tools/mosesdecoder/scripts
 python_scripts=./scripts/python
+src=es
+tgt=an
+pair=an-es
 
+
+rm -r ${data_tmp}
+mkdir -p ${data_output}
+mkdir -p ${data_tmp}
+
+rm ${data_output}/train.*
+
+FILES=(GNOME QED Tatoeba Ubuntu WikiMatrix XLEnt wikimedia)
+
+
+for file in ${FILES[@]}
+  do
+    ${moses_decoder}/training/clean-corpus-n.perl ${data_dir}/${file}.${pair} ${src} ${tgt} ${data_tmp}/${file}.original.clean 2 70
+    ##
+    cat ${data_tmp}/${file}.original.clean.${src} >> ${data_output}/train.original.${src}
+    cat ${data_tmp}/${file}.original.clean.${tgt} >> ${data_output}/train.original.${tgt} 
+done
+
+rm -r ${data_tmp}
+
+
+
+
+####### OLD CODE
 ## preprocess the data before
-for file in GNOME QED Tatoeba Ubuntu WikiMatrix XLent wikimedia
-do
-  cat ${data_dir}/${file}.an-es.es |
-      sed -r 's/^ //g' | sed -r 's/\\t//g' | sed -r 's/\_//g' | sed -r 's/« /\"/g' | sed -r 's/ »/\"/g' |
-      perl ${moses_decoder}/tokenizer/normalize-punctuation.perl -l es > ${data_output}/${file}.an-es.prepros.es
-  cat ${data_dir}/${file}.an-es.an |
-      sed -r 's/^ //g' | sed -r 's/\\t//g' | sed -r 's/\_//g' | sed -r 's/« /\"/g' | sed -r 's/ »/\"/g' |
-      perl ${moses_decoder}/tokenizer/normalize-punctuation.perl -l es > ${data_output}/${file}.an-es.prepros.an
+#for file in GNOME QED Tatoeba Ubuntu WikiMatrix XLEnt wikimedia
+#do
+#  cat ${data_dir}/${file}.${pair}.${src} |
+#    ${moses_decoder}/tokenizer/normalize-punctuation.perl -l ${src} |
+#    ${moses_decoder}/tokenizer/tokenizer.perl -l ${src} > ${data_tmp}/${file}.${pair}.prepros.${src}
+#  cat ${data_dir}/${file}.${pair}.${tgt} |
+#    ${moses_decoder}/tokenizer/normalize-punctuation.perl -l fr |
+#    ${moses_decoder}/tokenizer/tokenizer.perl -l fr > ${data_tmp}/${file}.${pair}.prepros.${tgt}
+#
+#    ${moses_decoder}/training/clean-corpus-n.perl ${data_tmp}/${file}.${pair}.prepros ${src} ${tgt} ${data_tmp}/${file}.clean 1 80 
+#done
+#
+### language calssification using fastext
+#for file in GNOME QED Tatoeba Ubuntu WikiMatrix XLEnt wikimedia
+#do
+#    ${fast_text}/fasttext predict ${fast_text}/language_recognition.bin ${data_tmp}/${file}.clean.${src} > ${data_tmp}/${file}.${src}.lang_classification.fast_text
+#    ${fast_text}/fasttext predict ${fast_text}/language_recognition.bin ${data_tmp}/${file}.clean.${tgt} > ${data_tmp}/${file}.${tgt}.lang_classification.fast_text
+#
+#    paste ${data_tmp}/${file}.clean.${src} ${data_tmp}/${file}.clean.${tgt} ${data_tmp}/${file}.${src}.lang_classification.fast_text \
+#    | awk -F'\t' '{if ($3=="__label__es") {print $1 > "'${data_tmp}'/'${file}'.filtered.'${src}'"; print $2 > "'${data_tmp}'/'${file}'.filtered.'${tgt}'"}}'
+#done
+#
+### add the ratio
+#for file in GNOME QED Tatoeba Ubuntu WikiMatrix XLEnt wikimedia
+#do
+#    python3 ${python_scripts}/preprocess/lev_ratio.py ${data_tmp}/${file}.filtered.${tgt} ${data_tmp}/${file}.filtered.${src} ${data_tmp}/${file}.levenshtein.${src} ${data_tmp}/${file}.levenshtein.${tgt}
+#done
+#
+#echo "" > ./experiments/data/train.{${src},${tgt}}
+#echo "" > ./experiments/data/train.{original,filtered,levenshtein}.{${src},${tgt}}
+#for file in GNOME QED Tatoeba Ubuntu WikiMatrix XLEnt wikimedia
+#do
+#  cat ${data_tmp}/${file}.clean.${src} >> ${data_output}/train.original.${src}
+#  cat ${data_tmp}/${file}.clean.${tgt} >> ${data_output}/train.original.${tgt}
+#  ###
+#  cat ${data_tmp}/${file}.filtered.${src} >> ${data_output}/train.filtered.${src}
+#  cat ${data_tmp}/${file}.filtered.${tgt} >> ${data_output}/train.filtered.${tgt}
+#  ###   
+#  cat ${data_tmp}/${file}.levenshtein.${src} >> ${data_output}/train.levensthein.${src}
+#  cat ${data_tmp}/${file}.levenshtein.${tgt} >> ${data_output}/train.levenshtein.${tgt}
+#done
 
-     ${moses_decoder}/training/clean-corpus.perl ${data_output}/${file}.prepros.an-es es an ${data_output}/${file}.clean 1 120 
-done
+#rm -r ${data_tmp}
 
-## language calssification using fastext
-for file in GNOME QED Tatoeba Ubuntu WikiMatrix XLent wikimedia
-do
-    ${fast_text}/fasttext predict ${fast_text}/language_recognition.bin ${data_output}/${file}.clean.es > ${data_output}/${file}.an-es.es.lang_classification.fast_text
-    ${fast_text}/fasttext predict ${fast_text}/language_recognition.bin ${data_output}/${file}.clean.an > ${data_output}/${file}.an-es.an.lang_classification.fast_text
-
-    echo "" > ${data_output}/${file}.an-es.es.filtered
-    echo "" > ${data_output}/${file}.an-es.an.filtered
-    paste ${data_output}/${file}.es.clean ${data_output}/${file}.an.clean ${data_output}/${file}.an-es.es.lang_classification.fast_text \
-    | awk -F'\t' '{if ($3=="__label__es") {print $1 > "'${data_output}'/'${file}'.es.filtered"; print $2 > "'${data_output}'/'${file}'.an.filtered"}}'
-done
-
-## add the ratio
-for file in GNOME QED Tatoeba Ubuntu WikiMatrix XLent wikimedia
-do
-    python3 ${python_scripts}/preprocess/lev_ratio.py ${data_output}/${file}.an.filtered ${data_output}/${file}.es.filtered ${data_output}/${file}.es.levensthein ${data_output}/${file}.an.levensthein
-done
-
-for file in GNOME QED Tatoeba Ubuntu WikiMatrix XLent wikimedia
-do
-  cat ${data_output}/${file}.clean.es >> ./experiments/data/original/train.es
-  cat ${data_output}/${file}.clean.an >> ./experiments/data/original/train.an
-  ###
-  cat ${data_output}/${file}.filtered.es >> ./experiments/data/filter/train.es
-  cat ${data_output}/${file}.filtered.an >> ./experiments/data/filter/train.an
-  ###   
-  cat ${data_output}/${file}.es.levenshtein >> ./experiments/data/filter.radio/train.es
-  cat ${data_output}/${file}.an.levenshtein >> ./experiments/data/filter.radio/train.an
-done
 ## stats for each corpus
 #for file in GNOME QED Tatoeba Ubuntu WikiMatrix XLent wikimedia
 #do
