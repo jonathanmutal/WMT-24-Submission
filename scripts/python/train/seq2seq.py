@@ -13,6 +13,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Modifications Copyright 2024 Jonathan David Mutal. All rights reserved.
+#
+# I refactored the non-trainer translation code into a dedicated class.
+# Additionally, I implemented support for multi-task and multi-lingual
+# operations, and introduced early stopping based on BLEU metrics.
+#
 """
 Fine-tuning a Transformers model on text translation.
 """
@@ -337,8 +344,26 @@ def parse_args():
             {oci_Latn: [{\"source\" : ./data/occitan/source.es, \"target\": ./data/occitan/target.oc}]}"
         ),
      )
+    parser.add_argument(
+        "--validation_multi_task",
+        type=str,
+        default=None,
+        help=(
+            "training in a multitask fashion in the target. \
+            we need to specify the token in the KEY and path in the Value. For \
+            instance, \
+            {\"oci_Latn\": {\"source\" : ./data/occitan/valid.es, \"target\": ./data/occitan/valid.oc}}"
+        ),
+     )
+    parser.add_argument(
+        "--skip_saving", action="store_true", help="Overwrite the cached training and evaluation sets"
+    )
     args = parser.parse_args()
-
+    # TODO : to remove right after the experiments
+    if args.max_source_length < 80:
+        args.max_source_length = 80
+    if args.max_target_length < 80:
+        args.max_target_length = 80
     # Sanity checks
     if args.early_stopping and args.early_stopping_steps is None:
         raise ValueError("Need for early_stopping_steps.")
@@ -348,11 +373,13 @@ def parse_args():
         args.early_stopping_steps = 100000
 
     if args.train_source_file is None and \
-       args.validation_source_file is None:
+       args.validation_source_file is None and\
+       args.validation_multi_task is None:
         raise ValueError("Need either a task name or a training/validation source file.")
 
     if args.train_target_file is None and \
-       args.validation_target_file is None:
+       args.validation_target_file is None and \
+       args.validation_multi_task is None:
         raise ValueError("Need either a task name or a training/validation target file.")
 
     ## if val_max_target_length is not set
@@ -376,6 +403,16 @@ def parse_args():
                 if not "target" in pair_files:
                     raise ValueError(f"Please, provide the target file (in target key) for the \
                                        file {index} in the {key} language")
+    if args.validation_multi_task:
+        args.validation_multi_task = json.loads(args.validation_multi_task)
+
+        for key in args.validation_multi_task.keys():
+            if not "source" in args.validation_multi_task[key]:
+                raise ValueError(f"Please, provide the source file (in source key) for the validation \
+                                 multitask json")
+            if not "target" in args.validation_multi_task[key]:
+                raise ValueError(f"Please, provide the target file (in target key) for the validation \
+                                 multi-task json")
     return args
 
 
@@ -431,9 +468,11 @@ class Trainer():
     resume_from_checkpoint_path: str = None
     with_tracking: bool = True
     report_to: str = "TensorBoard"
+    skip_saving: bool = False
 
     multilingual: bool = False
     multilingual_files : dict[list] = None
+    validation_multi_task: dict[list] = None
 
     def __post_init__(self):
         # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
@@ -503,7 +542,8 @@ class Trainer():
 
     def set_metrics(self):
         # TODO: do something more general
-         self.bleu = BLEU()
+        self.bleu = BLEU()
+        self.chrf = CHRF()
 
     def set_seed(self):
         # If passed along, set the training seed now.
@@ -636,6 +676,13 @@ class Trainer():
                         load_parallel_dataset(parallel_data["source"], parallel_data["target"])
                     )
                 self.raw_dataset_multilingual[key] = concatenate_datasets(parallel_datasets)
+        ## if it is multitask, we pre-process different validation data sets
+        if self.validation_multi_task:
+            self.raw_validation_multi_task = {}
+            for key in self.validation_multi_task.keys():
+                self.raw_validation_multi_task[key] = load_parallel_dataset(
+                    self.validation_multi_task[key]["source"], self.validation_multi_task[key]["target"]
+                )
 
     def preprocess_data(self):
         prefix = self.source_prefix if self.source_prefix is not None else ""
@@ -696,6 +743,15 @@ class Trainer():
                 ## joining all the datasets together
                 self.train_dataset = concatenate_datasets([self.train_dataset] + multilingual_datasets)
 
+            ## if it is multitask, we pre-process different validation data sets
+            if self.validation_multi_task:
+                self.validation_multi_task_dataset = {}
+                for key in self.raw_validation_multi_task.keys():
+                    self.validation_multi_task_dataset[key] = preprocess_dataset(
+                        self.raw_validation_multi_task[key],
+                        source_lang=self.source_lang,
+                        target_lang=key
+                    )
         # Log a few random samples from the training set:
         for index in random.sample(range(len(self.train_dataset)), 3):
             self.logger.info(f"Sample {index} of the training set: {self.train_dataset[index]}.")
@@ -731,6 +787,16 @@ class Trainer():
         self.eval_dataloader = DataLoader(
             self.eval_dataset, shuffle=False, collate_fn=data_collator, batch_size=self.per_device_eval_batch_size
         )
+
+        if self.validation_multi_task:
+            self.validation_multi_task_dataloader = {}
+            for key in self.validation_multi_task_dataset.keys():
+                self.validation_multi_task_dataloader[key] = DataLoader(
+                    self.validation_multi_task_dataset[key],
+                    shuffle=False,
+                    collate_fn=data_collator,
+                    batch_size=self.per_device_eval_batch_size
+                )
 
     def calculate_number_of_training_steps(self):
         # math around the number of training steps.
@@ -769,6 +835,12 @@ class Trainer():
         self.model, self.optimizer, self.train_dataloader, self.eval_dataloader, self.lr_scheduler = self.accelerator.prepare(
             self.model, self.optimizer, self.train_dataloader, self.eval_dataloader, self.lr_scheduler
         )
+        if self.validation_multi_task:
+            for key in self.validation_multi_task_dataloader.keys():
+                self.validation_multi_task_dataloader[key] = self.accelerator.prepare(
+                    self.validation_multi_task_dataloader[key]
+                )
+
         if self.resume_from_checkpoint:
             ### TODO: remove this part after saving the model using accelerator.save_model.
             if torch.cuda.is_available():
@@ -832,6 +904,20 @@ class Trainer():
         # TODO: do something more general
         self.best_bleu = 0.0
         self.bleu_early_stopping = 0
+        self.best_chrf = 0.0
+        self.chrf_early_stopping = 0
+
+        ### validation multi task
+        if self.validation_multi_task:
+            self.best_bleu_multi_task = {}
+            self.bleu_early_stopping_multi_task = {}
+            self.best_chrf_multi_task = {}
+            self.chrf_early_stopping_multi_task = {}
+            for key in self.validation_multi_task.keys():
+                self.best_bleu_multi_task[key] = 0.0
+                self.best_chrf_multi_task[key] = 0.0
+                self.bleu_early_stopping_multi_task[key] = 0
+                self.chrf_early_stopping_multi_task[key] = 0
 
         ### setting the earlystopping step from last checkpoint
         if self.resume_from_checkpoint:
@@ -839,6 +925,28 @@ class Trainer():
             with open(f"{self.checkpoint_path}/earlystopping") as f:
                 best_bleu, bleu_early_stopping  = f.readlines()[0].strip().split(' ')
             self.best_bleu, self.bleu_early_stopping = float(best_bleu), int(bleu_early_stopping)
+
+            try:
+                with open(f"{self.checkpoint_path}/chrfearlystopping") as f:
+                    best_chrf, chrf_early_stopping  = f.readlines()[0].strip().split(' ')
+                self.best_chrf, self.chrf_early_stopping = float(best_chrf), float(chrf_early_stopping)
+            except FileNotFoundError:
+                self.logger.info(f"Not found chrf for earlystopping in {self.checkpoint_path}/chrfearlystopping")
+
+            if self.validation_multi_task:
+                for key in self.validation_multi_task.keys():
+                    self.logger.info(f"Resuming early stopping steps from {self.checkpoint_path}/earlystopping")
+
+                for key in self.validation_multi_task.keys():
+                    with open(f"{self.checkpoint_path}/{key.replace('_','')}earlystopping") as f:
+                        best_bleu, bleu_early_stopping  = f.readlines()[0].strip().split(' ')
+                    self.best_bleu_multi_task[key], self.bleu_early_stopping_multi_task[key] = float(best_bleu), int(bleu_early_stopping)
+                    try:
+                        with open(f"{self.checkpoint_path}/chrfearlystopping") as f:
+                            best_chrf, chrf_early_stopping  = f.readlines()[0].strip().split(' ')
+                        self.best_chrf_multi_task[key], self.chrf_early_stopping_multi_task[key] = float(best_chrf), float(chrf_early_stopping)
+                    except FileNotFoundError:
+                        self.logger.info(f"Not found chrf for earlystopping in {self.checkpoint_path}/{key.replace('_','')}chrfearlystopping")
 
     ### auxiliar methods for training to save, write predictions and validate
     def save_model(self, name=""):
@@ -869,25 +977,41 @@ class Trainer():
         with open(f"{self.output_dir}/{name}/earlystopping", "w") as f:
             f.write(f"{self.best_bleu} {self.bleu_early_stopping}")
 
-    def write_prediction(self, predictions):
-        with open(f"{self.output_dir}/prediction", mode="w") as o:
+        with open(f"{self.output_dir}/{name}/chrfearlystopping", "w") as f:
+            f.write(f"{self.best_chrf} {self.chrf_early_stopping}")
+
+        # if validation multi task, we save the best earlystopping for each type of task
+        if self.validation_multi_task:
+            for key in self.validation_multi_task.keys():
+                with open(f"{self.output_dir}/{name}/{key.replace('_','')}earlystopping", "w") as f:
+                    f.write(f"{self.best_bleu_multi_task[key]} {self.bleu_early_stopping_multi_task[key]}")
+
+
+                with open(f"{self.output_dir}/{name}/{key.replace('_','')}chrfearlystopping", "w") as f:
+                    f.write(f"{self.best_chrf_multi_task[key]} {self.chrf_early_stopping_multi_task[key]}")
+
+
+    def write_prediction(self, predictions, name:str = "prediction"):
+        with open(f"{self.output_dir}/{name}", mode="w") as o:
             try:
                 o.write("\n".join(predictions))
             except:
                 self.logger.info("Error writing output file")
 
-    def validate(self):
+    def validate(self,
+                 eval_dataloader,
+                 target_lang: str):
         self.model.eval()
         gen_kwargs = {
             "max_length": self.val_max_target_length if self.val_max_target_length is not None else self.config.max_length,
             "num_beams": self.num_beams,
         }
         if isinstance(self.tokenizer, (NllbTokenizerFast)):
-            gen_kwargs["forced_bos_token_id"] = self.tokenizer.convert_tokens_to_ids(self.target_lang)
+            gen_kwargs["forced_bos_token_id"] = self.tokenizer.convert_tokens_to_ids(target_lang)
         samples_seen = 0
         predictions = []
         references = []
-        for step, batch in enumerate(self.eval_dataloader):
+        for step, batch in enumerate(eval_dataloader):
             with torch.no_grad():
                 generated_tokens = self.accelerator.unwrap_model(self.model).generate(
                     batch["input_ids"],
@@ -915,15 +1039,16 @@ class Trainer():
 
                 # If we are in a multiprocess environment, the last batch has duplicates
                 if self.accelerator.num_processes > 1:
-                    if step == len(self.eval_dataloader) - 1:
-                        decoded_preds = decoded_preds[: len(self.eval_dataloader.dataset) - samples_seen]
-                        decoded_labels = decoded_labels[: len(self.eval_dataloader.dataset) - samples_seen]
+                    if step == len(eval_dataloader) - 1:
+                        decoded_preds = decoded_preds[: len(eval_dataloader.dataset) - samples_seen]
+                        decoded_labels = decoded_labels[: len(eval_dataloader.dataset) - samples_seen]
                     else:
                         samples_seen += len(decoded_labels)
                 references.extend(decoded_labels)
                 predictions.extend(decoded_preds)
         score = {
-            'BLEU': self.bleu.corpus_score(hypotheses=predictions, references=[references]).score
+            'BLEU': self.bleu.corpus_score(hypotheses=predictions, references=[references]).score,
+            'CHRF': self.chrf.corpus_score(hypotheses=predictions, references=[references]).score
         }
         return score, predictions
 
@@ -961,6 +1086,7 @@ class Trainer():
         self.logger.info(f"  Max target length = {self.max_target_length}")
         self.logger.info(f"  Max generation target length = {self.val_max_target_length}")
         self.logger.info(f"  Multilingual approach = {self.multilingual}")
+        self.logger.info(f"  Multitask approach = {not (self.validation_multi_task is None)}")
 
         progress_bar = tqdm(range(self.max_train_steps), disable=not self.accelerator.is_local_main_process)
         completed_steps = 0
@@ -990,11 +1116,17 @@ class Trainer():
                 self.logger.info(f"  Starting Epoch = {starting_epoch}")
                 self.logger.info(f"  Completed Steps = {completed_steps}")
                 self.logger.info(f"  Early Stopping = {self.best_bleu} {self.bleu_early_stopping}")
+                self.logger.info(f"  Early Stopping = {self.best_chrf} {self.chrf_early_stopping}")
 
         # update the progress_bar if load from checkpoint
         progress_bar.update(completed_steps)
-        score, _ = self.validate()
-        self.logger.info(f"Validation Step 0 -- BLEU: {score['BLEU']:.2f}")
+        score, _ = self.validate(eval_dataloader=self.eval_dataloader, target_lang=self.target_lang)
+        self.logger.info(f"Validation Step 0 -- BLEU: {score['BLEU']:.2f} CHRF: {score['CHRF']:.2f}")
+
+        if self.validation_multi_task:
+            for key in self.validation_multi_task_dataloader.keys():
+                score, _ = self.validate(eval_dataloader=self.validation_multi_task_dataloader[key], target_lang=key)
+                self.logger.info(f"Validation {key} Step 0 -- BLEU: {score['BLEU']:.2f} CHRF: {score['CHRF']:.2f}")
 
         for epoch in range(starting_epoch, self.num_train_epochs):
             self.model.train()
@@ -1036,47 +1168,94 @@ class Trainer():
                 ## printing the progress and doing validation
                 if isinstance(self.checkpointing_steps, int):
                     if completed_steps % self.checkpointing_steps == 0:
-                        score, prediction = self.validate()
+                        score, prediction = self.validate(eval_dataloader=self.eval_dataloader,
+                                                          target_lang=self.target_lang)
                         if score["BLEU"] > self.best_bleu:
                             self.best_bleu = score["BLEU"]
-                            if self.accelerator.is_main_process:
+                            if self.accelerator.is_main_process and not self.skip_saving:
                                 self.save_model(f"bestmodel_{completed_steps}")
                             self.bleu_early_stopping = 0
                             self.write_prediction(prediction)
                         self.bleu_early_stopping += 1
+
+                        if score["CHRF"] > self.best_chrf:
+                            self.best_chrf = score["CHRF"]
+                            #if self.accelerator.is_main_process:
+                                #self.save_model(f"chrfbestmodel_{completed_steps}")
+                            self.chrf_early_stopping = 0
+                            self.write_prediction(prediction, "chrfprediction")
+
+                        self.chrf_early_stopping += 1
+
                         if self.accelerator.is_main_process:
-                            self.logger.info(f"Validation Step {completed_steps} -- BLEU: {score['BLEU']:.2f} (stalled {self.bleu_early_stopping} : {self.best_bleu:.2f}) -- Loss: {total_loss.item() / len(self.train_dataloader):.6f}")
+                            self.logger.info(f"Validation Step {completed_steps} -- BLEU: {score['BLEU']:.2f} (stalled {self.bleu_early_stopping} {self.best_bleu:.2f}) CHRF: {score['CHRF']:.2f} (stalled {self.chrf_early_stopping} {self.best_chrf:.2f}):  -- Loss: {total_loss.item() / len(self.train_dataloader):.6f}")
                             if self.with_tracking:
                                 self.accelerator.log(
                                     {
                                         "Cost": total_loss.item() / len(self.train_dataloader),
                                         "BLEU": score['BLEU'],
+                                        "CHRF": score["CHRF"],
                                         "best_bleu": self.best_bleu,
+                                        "best_chrf": self.best_chrf,
                                         "stalled": self.bleu_early_stopping,
                                     },
                                     step=completed_steps,
                                 )
+
+                        ## if multi-task, we calculate the score for each task
+                        if self.validation_multi_task:
+                            # we calculate the score for each task
+                            for key in self.validation_multi_task_dataloader.keys():
+                                score, prediction = self.validate(eval_dataloader=self.validation_multi_task_dataloader[key],
+                                                                  target_lang=key)
+                                # compute BLEU for each of the task
+                                if score["BLEU"] > self.best_bleu_multi_task[key]:
+                                    self.best_bleu_multi_task[key] = score["BLEU"]
+                                    if self.accelerator.is_main_process and not self.skip_saving:
+                                        self.save_model(f"{key.replace('_', '')}bestmodel_{completed_steps}")
+                                    self.bleu_early_stopping_multi_task[key] = 0
+                                    self.write_prediction(prediction, f"{key.replace('_', '')}prediction")
+                                self.bleu_early_stopping_multi_task[key] += 1
+                                if self.accelerator.is_main_process:
+                                    self.logger.info(f"Validation {key} Step {completed_steps} -- BLEU: {score['BLEU']:.2f} (stalled {self.bleu_early_stopping_multi_task[key]} : {self.best_bleu_multi_task[key]:.2f}) -- Loss: {total_loss.item() / len(self.train_dataloader):.6f}")
+                                    if self.with_tracking:
+                                        self.accelerator.log(
+                                            {
+                                                "Cost": total_loss.item() / len(self.train_dataloader),
+                                                "BLEU": score['BLEU'],
+                                                "best_bleu": self.best_bleu,
+                                                "stalled": self.bleu_early_stopping,
+                                            },
+                                            step=completed_steps,
+                                        )
+
+
                         ## begin to the state of train again
                         self.model.train()
 
                 # if we save the model each X steps for the checkpoint
                 if self.save_total_checkpoints and completed_steps % self.save_last_model_steps == 0:
-                   if self.accelerator.is_main_process:
+                   if self.accelerator.is_main_process and not self.skip_saving:
                        self.save_model(f"step_{completed_steps}")
+
+                if self.checkpointing_steps == "epoch":
+                    if self.accelerator.is_main_process and not self.skip_saving:
+                        self.save_model(f"epoch_{epoch}")
 
                 # if we finish the epochs or we reach the patient limit
                 # of improvement
                 if completed_steps >= self.max_train_steps or (self.early_stopping and self.bleu_early_stopping == self.early_stopping_steps):
                     break
 
-                if self.checkpointing_steps == "epoch":
-                    if self.accelerator.is_main_process:
-                        self.save_model(f"epoch_{epoch}")
+            # if we finish the epochs or we reach the patient limit
+            # of improvement
+            if completed_steps >= self.max_train_steps or (self.early_stopping and self.bleu_early_stopping == self.early_stopping_steps):
+                break
 
         if self.with_tracking:
             self.accelerator.end_training()
         if self.output_dir is not None:
-            if self.accelerator.is_main_process:
+            if self.accelerator.is_main_process and not self.skip_saving:
                 self.save_model(f"step_{completed_steps}")
 
         with open(os.path.join(self.output_dir, "all_results.json"), "w") as f:
