@@ -172,6 +172,14 @@ def parse_args():
     parser.add_argument(
         "--overwrite_cache", action="store_true", help="Overwrite the cached training and evaluation sets"
     )
+
+    parser.add_argument(
+        "--cache_file_name",
+        type=str,
+        default=None,
+        help="Provide the name of a path for the cache file. It is used to store the results" \
+             "of the computation instead of the automatically generated cache file name."
+    )
     parser.add_argument(
         "--max_length",
         type=int,
@@ -355,8 +363,14 @@ def parse_args():
             {\"oci_Latn\": {\"source\" : ./data/occitan/valid.es, \"target\": ./data/occitan/valid.oc}}"
         ),
      )
+
     parser.add_argument(
-        "--skip_saving", action="store_true", help="Overwrite the cached training and evaluation sets"
+        "--skip_saving", action="store_true", help="Skip saving the models when evaluated. This can be useful to test" \
+                                                    "the behaviour of the model in training"
+    )
+
+    parser.add_argument(
+        "--mixed_precision", action="store_true", help="Put the flag to have mixed precision depending on your hardware"
     )
     args = parser.parse_args()
     # TODO : to remove right after the experiments
@@ -413,6 +427,8 @@ def parse_args():
             if not "target" in args.validation_multi_task[key]:
                 raise ValueError(f"Please, provide the target file (in target key) for the validation \
                                  multi-task json")
+    if not args.overwrite_cache and not args.cache_file_name:
+        raise ValueError("Not overwriting the cache file, but you did not give the cache file name")
     return args
 
 
@@ -444,6 +460,7 @@ class Trainer():
 
     preprocessing_num_workers: int = None
     overwrite_cache: bool = True
+    cache_file_name: bool = True
 
     per_device_train_batch_size: int = 16
     per_device_eval_batch_size: int = 16
@@ -473,13 +490,16 @@ class Trainer():
     multilingual: bool = False
     multilingual_files : dict[list] = None
     validation_multi_task: dict[list] = None
+    mixed_precision: bool = False
 
     def __post_init__(self):
         # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
         # If we're using tracking, we also need to initialize it here and it will by default pick up all supported trackers
         # in the environment
+        mixed_precision = 'fp16' if self.mixed_precision else 'no'
         self.accelerator =(
-           Accelerator(log_with=self.report_to, project_dir=self.output_dir) if self.with_tracking else Accelerator()
+           Accelerator(log_with=self.report_to, project_dir=self.output_dir, mixed_precision=mixed_precision)
+            if self.with_tracking else Accelerator(mixed_precision=mixed_precision)
         )
         # set the logging for the training
         self.set_logging()
@@ -676,6 +696,7 @@ class Trainer():
                         load_parallel_dataset(parallel_data["source"], parallel_data["target"])
                     )
                 self.raw_dataset_multilingual[key] = concatenate_datasets(parallel_datasets)
+
         ## if it is multitask, we pre-process different validation data sets
         if self.validation_multi_task:
             self.raw_validation_multi_task = {}
@@ -692,7 +713,10 @@ class Trainer():
         column_names = self.raw_dataset_train.column_names
         padding = "max_length" if self.pad_to_max_length else False
 
-        def preprocess_dataset(dataset: Dataset, source_lang: str = None, target_lang: str = None):
+        def preprocess_dataset(dataset: Dataset,
+                               source_lang: str = None,
+                               target_lang: str = None,
+                               type_of_dataset: str = ""):
             def preprocess_function(examples: dict):
                 self.tokenizer.src_lang = source_lang
                 self.tokenizer.tgt_lang = target_lang
@@ -725,12 +749,13 @@ class Trainer():
                 num_proc=self.preprocessing_num_workers,
                 remove_columns=self.raw_dataset_train.column_names,
                 load_from_cache_file=not self.overwrite_cache,
+                cache_file_name= f"{self.cache_file_name}/{source_lang}--{target_lang}{type_of_dataset}" if self.cache_file_name else None,
                 desc="Running tokenizer on dataset",
             )
 
         with self.accelerator.main_process_first():
             self.train_dataset = preprocess_dataset(self.raw_dataset_train, source_lang=self.source_lang, target_lang=self.target_lang)
-            self.eval_dataset = preprocess_dataset(self.raw_dataset_valid, source_lang=self.source_lang, target_lang=self.target_lang)
+            self.eval_dataset = preprocess_dataset(self.raw_dataset_valid, source_lang=self.source_lang, target_lang=self.target_lang, type_of_dataset="valid")
             ## if it is multilingual, we preprocess each language with each special token
             if self.multilingual:
                 multilingual_datasets = []
@@ -782,10 +807,10 @@ class Trainer():
             )
 
         self.train_dataloader = DataLoader(
-            self.train_dataset, shuffle=True, collate_fn=data_collator, batch_size=self.per_device_train_batch_size
+            self.train_dataset, shuffle=True, collate_fn=data_collator, batch_size=self.per_device_train_batch_size, pin_memory=True
         )
         self.eval_dataloader = DataLoader(
-            self.eval_dataset, shuffle=False, collate_fn=data_collator, batch_size=self.per_device_eval_batch_size
+            self.eval_dataset, shuffle=False, collate_fn=data_collator, batch_size=self.per_device_eval_batch_size, pin_memory=True
         )
 
         if self.validation_multi_task:
@@ -951,8 +976,7 @@ class Trainer():
     ### auxiliar methods for training to save, write predictions and validate
     def save_model(self, name=""):
         self.logger.info(f" Saving model to {self.output_dir}/{name}")
-        self.accelerator.wait_for_everyone()
-        # TODO : remove next iterations
+
         unwrapped_model = self.accelerator.unwrap_model(self.model)
         unwrapped_model.save_pretrained(
             f"{self.output_dir}/{name}",
@@ -1118,6 +1142,7 @@ class Trainer():
                 self.logger.info(f"  Early Stopping = {self.best_bleu} {self.bleu_early_stopping}")
                 self.logger.info(f"  Early Stopping = {self.best_chrf} {self.chrf_early_stopping}")
 
+            self.accelerator.wait_for_everyone()
         # update the progress_bar if load from checkpoint
         progress_bar.update(completed_steps)
         score, _ = self.validate(eval_dataloader=self.eval_dataloader, target_lang=self.target_lang)
@@ -1172,6 +1197,8 @@ class Trainer():
                                                           target_lang=self.target_lang)
                         if score["BLEU"] > self.best_bleu:
                             self.best_bleu = score["BLEU"]
+                            # to wait for all the process to save the model
+                            self.accelerator.wait_for_everyone()
                             if self.accelerator.is_main_process and not self.skip_saving:
                                 self.save_model(f"bestmodel_{completed_steps}")
                             self.bleu_early_stopping = 0
@@ -1180,6 +1207,7 @@ class Trainer():
 
                         if score["CHRF"] > self.best_chrf:
                             self.best_chrf = score["CHRF"]
+                            # self.accelerator.wait_for_everyone()
                             #if self.accelerator.is_main_process:
                                 #self.save_model(f"chrfbestmodel_{completed_steps}")
                             self.chrf_early_stopping = 0
@@ -1211,6 +1239,7 @@ class Trainer():
                                 # compute BLEU for each of the task
                                 if score["BLEU"] > self.best_bleu_multi_task[key]:
                                     self.best_bleu_multi_task[key] = score["BLEU"]
+                                    self.accelerator.wait_for_everyone()
                                     if self.accelerator.is_main_process and not self.skip_saving:
                                         self.save_model(f"{key.replace('_', '')}bestmodel_{completed_steps}")
                                     self.bleu_early_stopping_multi_task[key] = 0
@@ -1235,10 +1264,12 @@ class Trainer():
 
                 # if we save the model each X steps for the checkpoint
                 if self.save_total_checkpoints and completed_steps % self.save_last_model_steps == 0:
-                   if self.accelerator.is_main_process and not self.skip_saving:
-                       self.save_model(f"step_{completed_steps}")
+                    self.accelerator.wait_for_everyone()
+                    if self.accelerator.is_main_process and not self.skip_saving:
+                        self.save_model(f"step_{completed_steps}")
 
                 if self.checkpointing_steps == "epoch":
+                    self.accelerator.wait_for_everyone()
                     if self.accelerator.is_main_process and not self.skip_saving:
                         self.save_model(f"epoch_{epoch}")
 
@@ -1255,6 +1286,7 @@ class Trainer():
         if self.with_tracking:
             self.accelerator.end_training()
         if self.output_dir is not None:
+            self.accelerator.wait_for_everyone()
             if self.accelerator.is_main_process and not self.skip_saving:
                 self.save_model(f"step_{completed_steps}")
 
