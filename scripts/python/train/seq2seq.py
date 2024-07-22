@@ -954,7 +954,7 @@ class Trainer():
             try:
                 with open(f"{self.checkpoint_path}/chrfearlystopping") as f:
                     best_chrf, chrf_early_stopping  = f.readlines()[0].strip().split(' ')
-                self.best_chrf, self.chrf_early_stopping = float(best_chrf), float(chrf_early_stopping)
+                self.best_chrf, self.chrf_early_stopping = float(best_chrf), int(chrf_early_stopping)
             except FileNotFoundError:
                 self.logger.info(f"Not found chrf for earlystopping in {self.checkpoint_path}/chrfearlystopping")
 
@@ -969,7 +969,7 @@ class Trainer():
                     try:
                         with open(f"{self.checkpoint_path}/chrfearlystopping") as f:
                             best_chrf, chrf_early_stopping  = f.readlines()[0].strip().split(' ')
-                        self.best_chrf_multi_task[key], self.chrf_early_stopping_multi_task[key] = float(best_chrf), float(chrf_early_stopping)
+                        self.best_chrf_multi_task[key], self.chrf_early_stopping_multi_task[key] = float(best_chrf), int(chrf_early_stopping)
                     except FileNotFoundError:
                         self.logger.info(f"Not found chrf for earlystopping in {self.checkpoint_path}/{key.replace('_','')}chrfearlystopping")
 
@@ -1139,8 +1139,8 @@ class Trainer():
                 self.logger.info(f"  Resumed from checkpoint = {self.checkpoint_path}")
                 self.logger.info(f"  Starting Epoch = {starting_epoch}")
                 self.logger.info(f"  Completed Steps = {completed_steps}")
-                self.logger.info(f"  Early Stopping = {self.best_bleu} {self.bleu_early_stopping}")
-                self.logger.info(f"  Early Stopping = {self.best_chrf} {self.chrf_early_stopping}")
+                self.logger.info(f"  Early Stopping BLEU = {self.best_bleu} {self.bleu_early_stopping}")
+                self.logger.info(f"  Early Stopping CHrF = {self.best_chrf} {self.chrf_early_stopping}")
 
             self.accelerator.wait_for_everyone()
         # update the progress_bar if load from checkpoint
@@ -1167,7 +1167,7 @@ class Trainer():
                 loss = outputs.loss
                 # We keep track of the loss at each epoch
                 if self.with_tracking:
-                    total_loss += loss.detach().float()
+                    total_loss += loss.detach().float() / self.gradient_accumulation_steps
                 loss = loss / self.gradient_accumulation_steps
                 self.accelerator.backward(loss)
                 if step % self.gradient_accumulation_steps == 0 or step == len(self.train_dataloader) - 1:
@@ -1177,45 +1177,46 @@ class Trainer():
                     progress_bar.update(1)
                     completed_steps += 1
                 if self.accelerator.is_main_process:
-                   if self.with_tracking:
-                       self.accelerator.log(
-                           {
-                               "step": step,
-                               "loss": loss.detach().float().item(),
-                               "cost": total_loss.item() / len(self.train_dataloader),
-                               "lr": self.lr_scheduler.get_last_lr()[0],
-                               "input_shape": batch["input_ids"].shape
-                           },
-                           step=completed_steps,
-                       )
-                       self.logger.info(f"Epoch : {int(epoch)+1} -- Step {completed_steps} -- Cost : {total_loss.item() / (step+1):.4f} -- lr : {self.lr_scheduler.get_last_lr()[0]:.14f} -- Loss Batch : {loss:.4f} -- Input shape : {batch['input_ids'].shape}")
+                    if self.with_tracking:
+                        self.accelerator.log(
+                            {
+                                "step": step,
+                                "loss": loss,
+                                "cost": total_loss.item() / len(self.train_dataloader),
+                                "lr": self.lr_scheduler.get_last_lr()[0],
+                                "input_shape": batch["input_ids"].shape
+                            },
+                            step=completed_steps,
+                        )
+                    self.logger.info(f"Epoch : {int(epoch)+1} -- Step {completed_steps} -- Cost : {total_loss.item() / (step+1):.4f} -- lr : {self.lr_scheduler.get_last_lr()[0]:.14f} -- Loss Batch : {loss:.4f} -- Input shape : {batch['input_ids'].shape}")
 
                 ## printing the progress and doing validation
                 if isinstance(self.checkpointing_steps, int):
                     if completed_steps % self.checkpointing_steps == 0:
-                        score, prediction = self.validate(eval_dataloader=self.eval_dataloader,
-                                                          target_lang=self.target_lang)
-                        if score["BLEU"] > self.best_bleu:
-                            self.best_bleu = score["BLEU"]
-                            # to wait for all the process to save the model
-                            self.accelerator.wait_for_everyone()
-                            if self.accelerator.is_main_process and not self.skip_saving:
-                                self.save_model(f"bestmodel_{completed_steps}")
-                            self.bleu_early_stopping = 0
-                            self.write_prediction(prediction)
-                        self.bleu_early_stopping += 1
-
-                        if score["CHRF"] > self.best_chrf:
-                            self.best_chrf = score["CHRF"]
-                            # self.accelerator.wait_for_everyone()
-                            #if self.accelerator.is_main_process:
-                                #self.save_model(f"chrfbestmodel_{completed_steps}")
-                            self.chrf_early_stopping = 0
-                            self.write_prediction(prediction, "chrfprediction")
-
-                        self.chrf_early_stopping += 1
-
+                        self.accelerator.wait_for_everyone()
                         if self.accelerator.is_main_process:
+                            score, prediction = self.validate(eval_dataloader=self.eval_dataloader,
+                                                              target_lang=self.target_lang)
+                            if score["BLEU"] > self.best_bleu:
+                                self.best_bleu = score["BLEU"]
+                                # to wait for all the process to save the model
+                                self.accelerator.wait_for_everyone()
+                                if not self.skip_saving:
+                                    self.save_model(f"bestmodel_{completed_steps}")
+                                self.bleu_early_stopping = 0
+                                self.write_prediction(prediction)
+                            self.bleu_early_stopping += 1
+
+                            if score["CHRF"] > self.best_chrf:
+                                self.best_chrf = score["CHRF"]
+                                # self.accelerator.wait_for_everyone()
+                                #if self.accelerator.is_main_process:
+                                    #self.save_model(f"chrfbestmodel_{completed_steps}")
+                                self.chrf_early_stopping = 0
+                                self.write_prediction(prediction, "chrfprediction")
+
+                            self.chrf_early_stopping += 1
+                            ## Print in the logger the validation step
                             self.logger.info(f"Validation Step {completed_steps} -- BLEU: {score['BLEU']:.2f} (stalled {self.bleu_early_stopping} {self.best_bleu:.2f}) CHRF: {score['CHRF']:.2f} (stalled {self.chrf_early_stopping} {self.best_chrf:.2f}):  -- Loss: {total_loss.item() / len(self.train_dataloader):.6f}")
                             if self.with_tracking:
                                 self.accelerator.log(
@@ -1230,22 +1231,23 @@ class Trainer():
                                     step=completed_steps,
                                 )
 
-                        ## if multi-task, we calculate the score for each task
-                        if self.validation_multi_task:
-                            # we calculate the score for each task
-                            for key in self.validation_multi_task_dataloader.keys():
-                                score, prediction = self.validate(eval_dataloader=self.validation_multi_task_dataloader[key],
-                                                                  target_lang=key)
-                                # compute BLEU for each of the task
-                                if score["BLEU"] > self.best_bleu_multi_task[key]:
-                                    self.best_bleu_multi_task[key] = score["BLEU"]
-                                    self.accelerator.wait_for_everyone()
-                                    if self.accelerator.is_main_process and not self.skip_saving:
-                                        self.save_model(f"{key.replace('_', '')}bestmodel_{completed_steps}")
-                                    self.bleu_early_stopping_multi_task[key] = 0
-                                    self.write_prediction(prediction, f"{key.replace('_', '')}prediction")
-                                self.bleu_early_stopping_multi_task[key] += 1
-                                if self.accelerator.is_main_process:
+                            ## if multi-task, we calculate the score for each task
+                            if self.validation_multi_task:
+                                # we calculate the score for each task
+                                for key in self.validation_multi_task_dataloader.keys():
+                                    score, prediction = self.validate(eval_dataloader=self.validation_multi_task_dataloader[key],
+                                                                      target_lang=key)
+                                    # compute BLEU for each of the task
+                                    if score["BLEU"] > self.best_bleu_multi_task[key]:
+                                        self.best_bleu_multi_task[key] = score["BLEU"]
+                                        self.accelerator.wait_for_everyone()
+                                        if not self.skip_saving:
+                                            self.save_model(f"{key.replace('_', '')}bestmodel_{completed_steps}")
+                                        self.bleu_early_stopping_multi_task[key] = 0
+                                        self.write_prediction(prediction, f"{key.replace('_', '')}prediction")
+                                    self.bleu_early_stopping_multi_task[key] += 1
+
+                                    ## to output the validation logs
                                     self.logger.info(f"Validation {key} Step {completed_steps} -- BLEU: {score['BLEU']:.2f} (stalled {self.bleu_early_stopping_multi_task[key]} : {self.best_bleu_multi_task[key]:.2f}) -- Loss: {total_loss.item() / len(self.train_dataloader):.6f}")
                                     if self.with_tracking:
                                         self.accelerator.log(
@@ -1290,8 +1292,8 @@ class Trainer():
             if self.accelerator.is_main_process and not self.skip_saving:
                 self.save_model(f"step_{completed_steps}")
 
-        with open(os.path.join(self.output_dir, "all_results.json"), "w") as f:
-            json.dump({"eval_bleu": self.best_bleu}, f)
+                with open(os.path.join(self.output_dir, "all_results.json"), "w") as f:
+                    json.dump({"eval_bleu": self.best_bleu}, f)
 
 
 def main():
