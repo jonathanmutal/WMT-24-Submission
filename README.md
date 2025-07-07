@@ -4,7 +4,7 @@
 **Affiliation**: TIM, University of Geneva  
 **Article**:  [TIM-UNIGE Translation into Low-Resource Languages of Spain for WMT24](https://aclanthology.org/2024.wmt-1.82)
 
-[🤗 Model on Hugging Face]([https://huggingface.co/UNIGE/wmt24-nllb-multilingual-aranese](https://huggingface.co/jonathanmutal/WMT24-spanish-to-aranese-aragonese)
+[🤗 Model on Hugging Face](https://huggingface.co/jonathanmutal/WMT24-spanish-to-aranese-aragonese)
 [📄 Paper (ACL 2024)](https://doi.org/10.18653/v1/2024.wmt-1.82)
 
 ## 📝 Overview
