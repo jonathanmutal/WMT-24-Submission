@@ -2,7 +2,7 @@
 
 **Authors**: Jonathan Mutal, Lucía Ormaechea  
 **Affiliation**: TIM, University of Geneva  
-**Article**: [https://aclanthology.org/2024.wmt-1.82/](TIM-UNIGE Translation into Low-Resource Languages of Spain for WMT24)
+**Article**:  [https://aclanthology.org/2024.wmt-1.82](TIM-UNIGE Translation into Low-Resource Languages of Spain for WMT24)
 
 ## 📝 Overview
 
