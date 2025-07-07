@@ -2,7 +2,7 @@
 
 **Authors**: Jonathan Mutal, Lucía Ormaechea  
 **Affiliation**: TIM, University of Geneva  
-**GitHub**: [https://github.com/jonathanmutal/WMT-24-Submission](https://github.com/jonathanmutal/WMT-24-Submission)
+**Article**: [https://aclanthology.org/2024.wmt-1.82/](TIM-UNIGE Translation into Low-Resource Languages of Spain for WMT24)
 
 ## 📝 Overview
 
@@ -42,18 +42,6 @@ WMT-24-Submission/
 ├── requirements.txt                    # Python dependencies
 ├── .gitignore                          # Git ignore list
 ├── README.md                           # Project documentation
-```
-
-
-```
-WMT-24-Submission/
-├── config/               # Training configs (HF/Accelerate)
-├── data/                 # Scripts and files for data preparation
-├── experiments/          # Scripts to run experiments
-├── generation/           # Scripts for BLOOMZ synthetic data generation
-├── scripts/              # Utility scripts (tokenization, preprocessing)
-├── fine_tuning/          # Multistage fine-tuning procedures
-└── evaluation/           # Evaluation scripts (BLEU, ChrF, TER, significance)
 ```
 
 ---
