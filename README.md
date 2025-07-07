@@ -25,6 +25,28 @@ The best systems achieved:
 
 ```
 WMT-24-Submission/
+├── scripts/
+│   ├── bash/                            # Bash scripts for pipeline orchestration
+│   │   ├── spanish_aragonese/          # Training scripts for spa-arg systems
+│   │   ├── spanish_asturian/           # (Not used in paper) Scripts for spa-ast experiments
+│   │   ├── spanish_occitan/            # Scripts for multilingual training (spa-arn + spa-oci)
+│   ├── python/                         # Python modules for training, decoding, preprocessing
+│   │   ├── decode/                     # Decoding scripts and synthetic generation with LLMs
+│   │   ├── distance/                   # Levenshtein distance functions
+│   │   ├── evaluation/                 # Evaluation metrics: ACC, WER
+│   │   ├── extra/                      # Utilities: health checks, token limit filters, post-processing
+│   │   ├── preprocess/                 # Preprocessing utilities (e.g., lexical ratio)
+│   │   ├── train/                      # Model training modules (seq2seq, LM)
+├── slrum/
+│   ├── python/train/                   # SLURM job scripts for multilingual NLLB training
+├── requirements.txt                    # Python dependencies
+├── .gitignore                          # Git ignore list
+├── README.md                           # Project documentation
+```
+
+
+```
+WMT-24-Submission/
 ├── config/               # Training configs (HF/Accelerate)
 ├── data/                 # Scripts and files for data preparation
 ├── experiments/          # Scripts to run experiments
@@ -134,12 +156,22 @@ Significance was tested using **paired approximate randomization (10,000 trials)
 If you use this work, please cite the WMT paper:
 
 ```bibtex
-@inproceedings{mutal2024timunige,
-  title = "{TIM-UNIGE}: Translation into Low-Resource Languages of Spain for {WMT24}",
-  author = {Mutal, Jonathan and Ormaechea, Lucía},
-  booktitle = "Proceedings of the Ninth Conference on Machine Translation",
-  year = {2024},
-  pages = {862--870}
+@inproceedings{mutal-ormaechea-2024-tim,
+    title = "{TIM}-{UNIGE} Translation into Low-Resource Languages of {S}pain for {WMT}24",
+    author = "Mutal, Jonathan  and
+      Ormaechea, Luc{\'i}a",
+    editor = "Haddow, Barry  and
+      Kocmi, Tom  and
+      Koehn, Philipp  and
+      Monz, Christof",
+    booktitle = "Proceedings of the Ninth Conference on Machine Translation",
+    month = nov,
+    year = "2024",
+    address = "Miami, Florida, USA",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2024.wmt-1.82/",
+    doi = "10.18653/v1/2024.wmt-1.82",
+    pages = "862--870",
 }
 ```
 
