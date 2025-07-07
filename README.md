@@ -1,7 +1,5 @@
 # TIM-UNIGE: Translation into Low-Resource Languages of Spain for WMT24
 
-# TIM-UNIGE: Translation into Low-Resource Languages of Spain for WMT24
-
 **Authors**: Jonathan Mutal, Lucía Ormaechea  
 **Affiliation**: TIM, University of Geneva  
 **GitHub**: [https://github.com/jonathanmutal/WMT-24-Submission](https://github.com/jonathanmutal/WMT-24-Submission)
