@@ -2,7 +2,7 @@
 
 **Authors**: Jonathan Mutal, Lucía Ormaechea  
 **Affiliation**: TIM, University of Geneva  
-**Article**:  [https://aclanthology.org/2024.wmt-1.82](TIM-UNIGE Translation into Low-Resource Languages of Spain for WMT24)
+**Article**:  [TIM-UNIGE Translation into Low-Resource Languages of Spain for WMT24](https://aclanthology.org/2024.wmt-1.82)
 
 ## 📝 Overview
 
@@ -81,10 +81,11 @@ pip install -r requirements.txt
 
 ## 🧪 Training Pipeline
 
-### Multistage Fine-tuning
+### Multistage multilingual Fine-tuning
 
 1. **Stage 1**  
    - Pre-training on large synthetic/crawled corpora (OPUS, PILAR, Apertium)
+   - Transfer learning from Occitan to Aranese
    - Filtered to max 100 tokens
    - Best model: NLLB
 
