@@ -11,7 +11,7 @@ This repository contains the code and configurations used for the constrained su
 - **Aragonese (spa-arg)**  
 
 Our approach combines:
-- A **multistage fine-tuning** strategy  
+- A **multilingual multistage approach** strategy: includes transfer from **Occitan** to improve **Aranese** translation
 - The use of **synthetic data** from LLMs (e.g., BLOOMZ) and **rule-based Apertium** translations  
 - A multilingual backbone model (NLLB 600M)  
 
